@@ -1,0 +1,4 @@
+# Los scripts de shell DEBEN terminar en LF: con CRLF fallan en Linux (y en el CI)
+*.sh text eol=lf
+tests/bin/* text eol=lf
+* text=auto

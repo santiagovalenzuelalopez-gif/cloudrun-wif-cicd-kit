@@ -1,0 +1,67 @@
+# azure-pipelines.prod.yml — variante para PRODUCCIÓN con aprobación humana.
+#
+# ############################################################################
+# ESTADO: NO VALIDADO contra una organización real. Sigue el diseño del flujo de producción
+# (conexión propia + Environment con aprobaciones + control de rama), pero a diferencia de
+# azure-pipelines.yml no se ha ejecutado de punta a punta. Revisar antes de usar.
+# ############################################################################
+#
+# Diferencias con la variante de QA:
+#   - Solo la rama main dispara el pipeline.
+#   - El despliegue es un `deployment` job sobre un Environment: en ADO, los Environments permiten
+#     exigir aprobaciones humanas ANTES de que corra el job (Approvals and checks).
+#   - Una service connection propia de producción, con "Grant access to all pipelines" DESMARCADO
+#     y Branch control que permita únicamente refs/heads/main (ver docs/SEGURIDAD.md).
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  # ── EDITAR ───────────────────────────────────────────────────────────────
+  CLOUD_RUN_SERVICE_NAME: 'my-service'
+  GCP_PROJECT_ID: 'my-gcp-prod-project'
+  GCP_SERVICE_CONNECTION: 'gcp-my-gcp-prod-project'
+  BUILD_SA: 'cloudbuild-deployer@my-gcp-prod-project.iam.gserviceaccount.com'
+  ADO_ENVIRONMENT: 'production'                   # con Approvals configuradas en ADO
+
+stages:
+  - stage: Deploy
+    displayName: Despliegue a producción
+    jobs:
+      - deployment: DeployToCloudRun
+        displayName: Build + deploy (requiere aprobación)
+        environment: $(ADO_ENVIRONMENT)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  clean: true
+
+                - task: GcpWifAuth@0
+                  displayName: '[WIF] Autenticar en GCP'
+                  inputs:
+                    connectedServiceId: '${{ variables.GCP_SERVICE_CONNECTION }}'
+
+                - bash: |
+                    set -euo pipefail
+                    gcloud config set project "$(GCP_PROJECT_ID)"
+                    gcloud auth print-access-token > /dev/null && echo "TOKEN OK"
+                  displayName: '[WIF] Verificar credencial'
+
+                - bash: |
+                    set -euo pipefail
+                    gcloud builds submit \
+                      --config=cloudbuild.yaml \
+                      --gcs-source-staging-dir="gs://$(GCP_PROJECT_ID)_cloudbuild/source" \
+                      --substitutions="_SERVICE_NAME=$(CLOUD_RUN_SERVICE_NAME),COMMIT_SHA=$(Build.SourceVersion)" \
+                      --service-account="projects/$(GCP_PROJECT_ID)/serviceAccounts/$(BUILD_SA)" \
+                      --project="$(GCP_PROJECT_ID)"
+                  displayName: '[WIF] Build + deploy (cloudbuild.yaml)'

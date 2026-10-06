@@ -1,0 +1,59 @@
+# Build + deploy reutilizando el cloudbuild.yaml PROPIO del repo (patrón preferido).
+#
+# Flujo: auth federada -> `gcloud builds submit` (el fuente se sube como tarball: Cloud Build no
+# necesita estar conectado a ningún repositorio) -> Cloud Build ejecuta como la SA del build ->
+# `gcloud run deploy`. Se reutiliza el cloudbuild.yaml del repo como fuente de verdad (env vars,
+# secrets, recursos) en lugar de reconstruir sus flags aquí: así no se desincronizan.
+#
+# Requisitos del cloudbuild.yaml:
+#   - Si etiqueta la imagen con ${COMMIT_SHA}: este template lo pasa explícito (Build.SourceVersion).
+#     Cloud Build solo lo rellena en builds disparados por un trigger; con `builds submit` quedaría
+#     vacío y el push de la imagen fallaría (tag vacío).
+#   - Debe aceptar la substitution _SERVICE_NAME (y las que se pasen en extraSubstitutions).
+#
+# Por qué --gcs-source-staging-dir explícito: sin él, gcloud verifica el bucket por defecto
+# LISTANDO los buckets del proyecto (storage.buckets.list), un permiso que la SA federada no
+# tiene ni debe tener. Con el staging explícito omite ese listado.
+
+parameters:
+  - name: serviceConnection
+    type: string
+  - name: projectId
+    type: string
+  - name: serviceName
+    type: string
+  - name: configFile
+    type: string
+    default: 'cloudbuild.yaml'
+  - name: extraSubstitutions     # opcional: 'K1=v1,K2=v2' (claves con _ inicial; los valores no llevan comas)
+    type: string
+    default: ''
+  - name: buildServiceAccount    # nombre de la SA que EJECUTA el build (no la federada)
+    type: string
+    default: 'cloudbuild-deployer'
+  - name: stagingBucket          # vacío = <projectId>_cloudbuild
+    type: string
+    default: ''
+
+steps:
+  - template: gcp-auth.yml
+    parameters:
+      serviceConnection: ${{ parameters.serviceConnection }}
+      projectId: ${{ parameters.projectId }}
+
+  - bash: |
+      set -euo pipefail
+      BUCKET="${{ parameters.stagingBucket }}"
+      [ -n "$BUCKET" ] || BUCKET="${{ parameters.projectId }}_cloudbuild"
+      SUBS="_SERVICE_NAME=${{ parameters.serviceName }},COMMIT_SHA=$(Build.SourceVersion)"
+      if [ -n "${{ parameters.extraSubstitutions }}" ]; then
+        SUBS="$SUBS,${{ parameters.extraSubstitutions }}"
+      fi
+      echo "Desplegando ${{ parameters.serviceName }} (commit $(Build.SourceVersion))"
+      gcloud builds submit \
+        --config="${{ parameters.configFile }}" \
+        --gcs-source-staging-dir="gs://${BUCKET}/source" \
+        --substitutions="$SUBS" \
+        --service-account="projects/${{ parameters.projectId }}/serviceAccounts/${{ parameters.buildServiceAccount }}@${{ parameters.projectId }}.iam.gserviceaccount.com" \
+        --project="${{ parameters.projectId }}"
+    displayName: '[WIF] Build + deploy via cloudbuild.yaml (sin repo conectado)'

@@ -1,0 +1,40 @@
+# Autenticación federada Azure DevOps -> Google Cloud (Workload Identity Federation), sin llaves.
+#
+# Usa la extensión de Marketplace "Google Cloud Auth" (tarea GcpWifAuth@0) y su propio tipo de
+# service connection "Google Cloud (WIF)". NO requiere un App Registration en Entra ni una
+# conexión ARM.
+#
+# Cómo funciona: la tarea pide a ADO un token OIDC para la service connection, lo canjea en GCP STS
+# contra el provider configurado en la conexión e impersona a la service account federada. Deja
+# CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE y GOOGLE_APPLICATION_CREDENTIALS apuntando a un
+# credential-config para los pasos siguientes.
+#
+# SIN continueOnError: si el canje falla la tarea debe fallar; de lo contrario los pasos siguientes
+# correrían sin autenticar (o con otra identidad).
+#
+# Lo que NO funciona (ver docs/TROUBLESHOOTING.md):
+#   - Pedir el token OIDC con curl desde un script: ADO exige que el job referencie la conexión
+#     desde una TAREA que la declare como input.
+#   - Una conexión ARM manual con el issuer de Entra: queda en DRAFT sin un App Registration real.
+#
+# Requisitos: extensión instalada en la organización (la instala un administrador de la org),
+# service connection "Google Cloud (WIF)" creada con los valores que imprime scripts/wif-setup.sh,
+# y el pipeline autorizado sobre esa conexión.
+
+parameters:
+  - name: serviceConnection   # nombre (o GUID) de la service connection WIF
+    type: string
+  - name: projectId           # proyecto de GCP donde correrá gcloud
+    type: string
+
+steps:
+  - task: GcpWifAuth@0
+    displayName: '[WIF] Autenticar en GCP'
+    inputs:
+      connectedServiceId: ${{ parameters.serviceConnection }}
+
+  - bash: |
+      set -euo pipefail
+      gcloud config set project "${{ parameters.projectId }}"
+      gcloud auth print-access-token > /dev/null && echo "TOKEN OK (identidad federada activa)"
+    displayName: '[WIF] Verificar credencial'

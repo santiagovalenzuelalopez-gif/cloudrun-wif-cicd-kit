@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# gcloud FALSO para probar scripts/wif-setup.sh sin tocar ninguna nube.
+#
+# El "mundo" es un directorio ($WORLD) con archivos que describen qué existe y qué permisos hay.
+# Los comandos de lectura responden desde esos archivos; los que modifican algo solo se registran
+# en $WORLD/mutations.log (así los tests comprueban que 'plan' y 'verify' NO modifican nada).
+set -u
+: "${WORLD:?WORLD no definido}"
+
+args="$*"
+echo "$args" >> "$WORLD/calls.log"
+
+emit() {  # imprime stdin; con $WORLD/crlf simula la salida CRLF de gcloud en Windows
+  if [ -f "$WORLD/crlf" ]; then sed 's/$/\r/'; else cat; fi
+}
+file_or_fail() { [ -f "$1" ] || exit 1; emit < "$1"; }
+exists_or_fail() { [ -f "$1" ] || exit 1; exit 0; }
+after() {  # primer argumento posicional que sigue a la palabra $1
+  echo "$args" | awk -v w="$1" '{for(i=1;i<=NF;i++) if($i==w){print $(i+1); exit}}'
+}
+
+case "$args" in
+  "config get-value account"*) file_or_fail "$WORLD/account" ;;
+  "projects describe"*) file_or_fail "$WORLD/project_number" ;;
+
+  "projects get-iam-policy"*"--format=value(etag)"*)
+    [ -f "$WORLD/deny_project_iam" ] && exit 1; echo etag ;;
+  "projects get-iam-policy"*"bindings.members:serviceAccount:"*)
+    email=$(echo "$args" | sed -E 's/.*bindings\.members:serviceAccount:([^ ]+).*/\1/')
+    [ -f "$WORLD/project_roles/$email" ] && emit < "$WORLD/project_roles/$email"; exit 0 ;;
+
+  "services list"*)
+    api=$(echo "$args" | sed -E 's/.*config\.name=([^ ]+).*/\1/')
+    grep -qxF "$api" "$WORLD/apis_enabled" 2>/dev/null && echo "$api" | emit; exit 0 ;;
+
+  "iam service-accounts describe"*)
+    email=$(after describe); grep -qxF "$email" "$WORLD/sa_exists" 2>/dev/null || exit 1; echo "$email" | emit ;;
+  "iam service-accounts get-iam-policy"*)
+    email=$(after get-iam-policy); [ -f "$WORLD/sa_policy/$email" ] && emit < "$WORLD/sa_policy/$email"; exit 0 ;;
+  "iam service-accounts keys list"*)
+    email=$(echo "$args" | sed -E 's/.*--iam-account=([^ ]+).*/\1/')
+    [ -f "$WORLD/keys/$email" ] && emit < "$WORLD/keys/$email"; exit 0 ;;
+
+  "iam workload-identity-pools providers describe"*)
+    [ -f "$WORLD/provider_state" ] || exit 1
+    case "$args" in
+      *"--format=value(state,oidc.issuerUri)"*) printf '%s\t%s\n' "$(cat "$WORLD/provider_state")" "$(cat "$WORLD/provider_issuer")" | emit ;;
+      *"--format=value(state)"*) file_or_fail "$WORLD/provider_state" ;;
+      *"--format=value(oidc.issuerUri)"*) file_or_fail "$WORLD/provider_issuer" ;;
+      *"--format=value(oidc.allowedAudiences)"*) file_or_fail "$WORLD/provider_audience" ;;
+      *"--format=value(attributeMapping)"*) file_or_fail "$WORLD/provider_mapping" ;;
+      *"--format=value(attributeCondition)"*) file_or_fail "$WORLD/provider_condition" ;;
+      *) exit 0 ;;
+    esac ;;
+  "iam workload-identity-pools describe"*) exists_or_fail "$WORLD/pool" ;;
+
+  "storage buckets describe"*) exists_or_fail "$WORLD/bucket" ;;
+  "storage buckets get-iam-policy"*) [ -f "$WORLD/bucket_policy" ] && emit < "$WORLD/bucket_policy"; exit 0 ;;
+
+  "artifacts repositories describe"*) exists_or_fail "$WORLD/ar" ;;
+  "artifacts repositories get-iam-policy"*) [ -f "$WORLD/ar_policy" ] && emit < "$WORLD/ar_policy"; exit 0 ;;
+
+  "builds triggers list"*) [ -f "$WORLD/triggers" ] && emit < "$WORLD/triggers"; exit 0 ;;
+  "org-policies describe"*) exit 1 ;;
+
+  *)  # cualquier otro comando modifica algo: se registra y se da por exitoso
+    echo "$args" >> "$WORLD/mutations.log"; exit 0 ;;
+esac

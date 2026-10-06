@@ -1,0 +1,62 @@
+# azure-pipelines.yml — plantilla estándar de despliegue Azure DevOps -> Cloud Run (WIF, sin llaves).
+#
+# Copiar a la raíz del repo del servicio y editar SOLO el bloque "EDITAR".
+# Requiere en el repo un Dockerfile y un cloudbuild.yaml (ver examples/cloudbuild.yaml) que acepte
+# _SERVICE_NAME y etiquete la imagen con ${COMMIT_SHA}.
+#
+# Con un repositorio de templates compartido, los tres pasos se reducen a:
+#   - template: templates/deploy-via-cloudbuild.yml@pipeline-templates
+# Aquí van INLINE porque referenciar un template externo exige un repo de templates en ADO y no
+# siempre hay permiso para crearlo.
+
+trigger:
+  branches:
+    include:
+      - qa
+  paths:
+    exclude:            # los cambios solo de documentación no despliegan
+      - docs
+      - README.md
+
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  # ── EDITAR ───────────────────────────────────────────────────────────────
+  CLOUD_RUN_SERVICE_NAME: 'my-service-qa'
+  GCP_PROJECT_ID: 'my-gcp-project'
+  GCP_SERVICE_CONNECTION: 'gcp-my-gcp-project'      # service connection "Google Cloud (WIF)"
+  BUILD_SA: 'cloudbuild-deployer@my-gcp-project.iam.gserviceaccount.com'
+
+steps:
+  - checkout: self
+    clean: true
+
+  # Canjea el token OIDC de ADO por credenciales de GCP (impersona la SA federada).
+  # SIN continueOnError: si falla, el pipeline debe detenerse.
+  - task: GcpWifAuth@0
+    displayName: '[WIF] Autenticar en GCP'
+    inputs:
+      connectedServiceId: '${{ variables.GCP_SERVICE_CONNECTION }}'
+
+  - bash: |
+      set -euo pipefail
+      gcloud config set project "$(GCP_PROJECT_ID)"
+      gcloud auth print-access-token > /dev/null && echo "TOKEN OK"
+    displayName: '[WIF] Verificar credencial'
+
+  # Ejecuta el cloudbuild.yaml del repo como la SA del build (build + push + deploy).
+  #  - COMMIT_SHA explícito: solo los triggers lo rellenan; sin él, el tag de la imagen queda vacío.
+  #  - --gcs-source-staging-dir explícito: evita que gcloud necesite storage.buckets.list.
+  - bash: |
+      set -euo pipefail
+      echo "Desplegando $(CLOUD_RUN_SERVICE_NAME) (commit $(Build.SourceVersion))"
+      gcloud builds submit \
+        --config=cloudbuild.yaml \
+        --gcs-source-staging-dir="gs://$(GCP_PROJECT_ID)_cloudbuild/source" \
+        --substitutions="_SERVICE_NAME=$(CLOUD_RUN_SERVICE_NAME),COMMIT_SHA=$(Build.SourceVersion)" \
+        --service-account="projects/$(GCP_PROJECT_ID)/serviceAccounts/$(BUILD_SA)" \
+        --project="$(GCP_PROJECT_ID)"
+    displayName: '[WIF] Build + deploy (cloudbuild.yaml)'
