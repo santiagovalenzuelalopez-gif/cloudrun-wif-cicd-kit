@@ -417,7 +417,8 @@ phase_verify() {
     done < <(sa_bindings "$FED_SA")
     local e_sorted a_sorted
     e_sorted="$(printf '%s\n' "${expected[@]}" | sort)"
-    a_sorted="$( [ "${#actual[@]}" -gt 0 ] && printf '%s\n' "${actual[@]}" | sort || true)"
+    a_sorted=""
+    if [ "${#actual[@]}" -gt 0 ]; then a_sorted="$(printf '%s\n' "${actual[@]}" | sort)"; fi
     if [ "$e_sorted" = "$a_sorted" ]; then ok "workloadIdentityUser solo para los subjects esperados (principal:// exacto)"
     else bad "workloadIdentityUser difiere de lo esperado. Esperado:"$'\n'"$e_sorted"$'\n'"Actual:"$'\n'"$a_sorted"; fi
     if printf '%s\n' "${actual[@]:-}" | grep -q 'principalSet://'; then bad "Hay un principalSet en la SA federada (prohibido)"; fi
